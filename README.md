@@ -83,3 +83,50 @@ async def synthesize(self, text: str, *, sample_rate: int) -> Audio:
 ```
 
 Provider SDKs, auth, retries, formats, and decoding belong outside this package.
+
+## FastAPI streaming
+
+`PrefixSpeaker` also exposes async iterators for HTTP streaming. The package does not depend on FastAPI.
+
+```py
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from tts_prefix_cache import PrefixSpeaker, PrefixSpeakerConfig
+
+app = FastAPI()
+
+
+class SpeakRequest(BaseModel):
+    prefix: str
+    rest: str
+    key: str | None = None
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    app.state.speaker = PrefixSpeaker(
+        tts=my_synthesizer,
+        config=PrefixSpeakerConfig(
+            sample_rate=24000,
+            pace_audio=False,
+        ),
+    )
+
+
+@app.post("/speak.pcm")
+async def speak_pcm(req: SpeakRequest):
+    speaker: PrefixSpeaker = app.state.speaker
+
+    return StreamingResponse(
+        speaker.pcm16le_stream(
+            prefix=req.prefix,
+            rest=req.rest,
+            key=req.key,
+        ),
+        media_type="audio/x-raw; format=S16LE; rate=24000; channels=1",
+    )
+```
+
+For realtime sinks, keep `pace_audio=True`. For HTTP responses where the client/player handles buffering, `pace_audio=False` avoids artificial server-side playback pacing.

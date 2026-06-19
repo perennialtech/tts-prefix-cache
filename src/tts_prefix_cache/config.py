@@ -28,6 +28,7 @@ class PrefixSpeakerConfig:
     sample_rate: int = 24000
     chunk_ms: float = 40.0
     wait_silence_chunk_ms: float = 30.0
+    pace_audio: bool = True
     splice: SpliceConfig = field(default_factory=SpliceConfig)
 
     def __post_init__(self) -> None:

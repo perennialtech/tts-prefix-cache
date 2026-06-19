@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,65 @@ from .config import AudioSink
 
 Logger = Callable[[str], None]
 Sleep = Callable[[float], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class _QueueEnd:
+    error: BaseException | None = None
+
+
+class QueueAudioSink:
+    def __init__(self, *, max_chunks: int = 16):
+        if max_chunks <= 0:
+            raise ValueError("max_chunks must be positive")
+
+        self._queue: asyncio.Queue[Audio | _QueueEnd] = asyncio.Queue(
+            maxsize=max_chunks
+        )
+        self._closed = False
+
+    async def write(self, chunk: Audio) -> None:
+        if self._closed:
+            raise RuntimeError("audio sink is closed")
+
+        audio = to_mono_float32(chunk)
+        if audio.size:
+            await self._queue.put(audio.copy())
+
+    async def close(self, error: BaseException | None = None) -> None:
+        if self._closed:
+            return
+
+        self._closed = True
+        await self._queue.put(_QueueEnd(error))
+
+    def abort(self, error: BaseException | None = None) -> None:
+        if self._closed:
+            return
+
+        self._closed = True
+
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        self._queue.put_nowait(_QueueEnd(error))
+
+    async def chunks(self) -> AsyncIterator[Audio]:
+        while True:
+            item = await self._queue.get()
+
+            if isinstance(item, _QueueEnd):
+                if item.error is not None:
+                    raise item.error
+                return
+
+            yield item
+
+    def __aiter__(self) -> AsyncIterator[Audio]:
+        return self.chunks()
 
 
 class BufferedWavSink:
@@ -46,6 +106,7 @@ async def stream_audio(
     audio: Audio,
     sample_rate: int,
     chunk_ms: float,
+    pace: bool = True,
     label: str | None = None,
     logger: Logger | None = None,
     sleep: Sleep = asyncio.sleep,
@@ -61,7 +122,9 @@ async def stream_audio(
     for start in range(0, len(samples), chunk_n):
         chunk = samples[start : start + chunk_n]
         await sink.write(chunk)
-        await sleep(len(chunk) / sample_rate)
+
+        if pace:
+            await sleep(len(chunk) / sample_rate)
 
     if logger is not None and label is not None:
         logger(f"[stream] end {label}")

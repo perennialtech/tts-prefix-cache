@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Hashable
+from collections.abc import AsyncIterator, Awaitable, Callable, Hashable
 from contextlib import suppress
 
-from ._audio import (Audio, ms_to_samples, samples_to_ms, silence,
-                     to_mono_float32)
+from ._audio import (Audio, ms_to_samples, pcm16le_bytes, samples_to_ms,
+                     silence, to_mono_float32)
 from .cache import MemoryPrefixCache
 from .config import (AudioSink, CacheStatus, PrefixSpeakerConfig, SpeakResult,
                      Synthesizer)
-from .sink import stream_audio
-from .splice import (PreparedPrefix, prepare_prefix_audio,
+from .sink import QueueAudioSink, stream_audio
+from .splice import (PreparedPrefix, SpliceResult, prepare_prefix_audio,
                      splice_from_full_audio)
 
 Logger = Callable[[str], None]
@@ -43,6 +43,62 @@ class PrefixSpeaker:
         key: Hashable | None = None,
     ) -> None:
         await self._get_prepared_prefix(prefix, key=key)
+
+    async def audio_stream(
+        self,
+        *,
+        prefix: str,
+        rest: str,
+        key: Hashable | None = None,
+    ) -> AsyncIterator[Audio]:
+        sink = QueueAudioSink()
+
+        async def produce() -> None:
+            error: BaseException | None = None
+
+            try:
+                await self.speak(
+                    prefix=prefix,
+                    rest=rest,
+                    sink=sink,
+                    key=key,
+                )
+            except BaseException as exc:
+                error = exc
+                raise
+            finally:
+                with suppress(asyncio.CancelledError):
+                    await sink.close(error)
+
+        task = asyncio.create_task(produce())
+
+        try:
+            async for chunk in sink.chunks():
+                yield chunk
+        except BaseException:
+            if not task.done():
+                task.cancel()
+
+            sink.abort()
+
+            with suppress(BaseException):
+                await task
+
+            raise
+
+        await task
+
+    async def pcm16le_stream(
+        self,
+        *,
+        prefix: str,
+        rest: str,
+        key: Hashable | None = None,
+    ) -> AsyncIterator[bytes]:
+        async for chunk in self.audio_stream(prefix=prefix, rest=rest, key=key):
+            data = pcm16le_bytes(chunk)
+            if data:
+                yield data
 
     async def speak(
         self,
@@ -78,6 +134,7 @@ class PrefixSpeaker:
                 audio=prefix_head,
                 sample_rate=self.config.sample_rate,
                 chunk_ms=self.config.chunk_ms,
+                pace=self.config.pace_audio,
                 label="cached prefix",
                 logger=self.logger,
                 sleep=self._sleep,
@@ -85,11 +142,9 @@ class PrefixSpeaker:
 
             if full_task.done():
                 full_audio = await full_task
-                splice = splice_from_full_audio(
+                splice = await self._splice_from_full_audio(
                     prefix=prepared,
                     full_audio=full_audio,
-                    sample_rate=self.config.sample_rate,
-                    config=self.config.splice,
                     held_tail=held_tail,
                 )
             else:
@@ -99,6 +154,7 @@ class PrefixSpeaker:
                         audio=held_tail,
                         sample_rate=self.config.sample_rate,
                         chunk_ms=self.config.chunk_ms,
+                        pace=self.config.pace_audio,
                         label="cached prefix tail",
                         logger=self.logger,
                         sleep=self._sleep,
@@ -108,11 +164,9 @@ class PrefixSpeaker:
                     task=full_task,
                     sink=sink,
                 )
-                splice = splice_from_full_audio(
+                splice = await self._splice_from_full_audio(
                     prefix=prepared,
                     full_audio=full_audio,
-                    sample_rate=self.config.sample_rate,
-                    config=self.config.splice,
                 )
 
             synth_elapsed_ms = (time.perf_counter() - synth_start) * 1000.0
@@ -135,6 +189,7 @@ class PrefixSpeaker:
                 audio=splice.continuation,
                 sample_rate=self.config.sample_rate,
                 chunk_ms=self.config.chunk_ms,
+                pace=self.config.pace_audio,
                 label="generated continuation",
                 logger=self.logger,
                 sleep=self._sleep,
@@ -189,10 +244,27 @@ class PrefixSpeaker:
 
     async def _prepare_prefix(self, prefix: str) -> PreparedPrefix:
         audio = await self._synthesize(prefix)
-        return prepare_prefix_audio(
+        return await asyncio.to_thread(
+            prepare_prefix_audio,
             audio,
             sample_rate=self.config.sample_rate,
             config=self.config.splice,
+        )
+
+    async def _splice_from_full_audio(
+        self,
+        *,
+        prefix: PreparedPrefix,
+        full_audio: Audio,
+        held_tail: object | None = None,
+    ) -> SpliceResult:
+        return await asyncio.to_thread(
+            splice_from_full_audio,
+            prefix=prefix,
+            full_audio=full_audio,
+            sample_rate=self.config.sample_rate,
+            config=self.config.splice,
+            held_tail=held_tail,
         )
 
     async def _await_full_audio(

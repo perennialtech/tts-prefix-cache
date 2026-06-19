@@ -45,18 +45,23 @@ def concatenate_audio(parts: list[object] | tuple[object, ...]) -> Audio:
     return np.concatenate(chunks).astype(np.float32, copy=False)
 
 
+def pcm16le_bytes(audio: object) -> bytes:
+    samples = np.clip(to_mono_float32(audio), -1.0, 1.0)
+    if samples.size == 0:
+        return b""
+
+    return (samples * 32767.0).astype("<i2", copy=False).tobytes()
+
+
 def write_wav(path: str | os.PathLike[str], audio: object, sample_rate: int) -> None:
     wav_path = Path(path)
     wav_path.parent.mkdir(parents=True, exist_ok=True)
-
-    samples = np.clip(to_mono_float32(audio), -1.0, 1.0)
-    pcm = (samples * 32767.0).astype("<i2", copy=False)
 
     with wave.open(str(wav_path), "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(struct.calcsize("<h"))
         wf.setframerate(sample_rate)
-        wf.writeframes(pcm.tobytes())
+        wf.writeframes(pcm16le_bytes(audio))
 
 
 def _frame_inputs(
