@@ -15,7 +15,9 @@ def to_mono_float32(audio: object) -> Audio:
     arr = np.asarray(audio, dtype=np.float32)
     if arr.ndim != 1:
         raise ValueError("audio must be a mono 1D array")
-    return arr
+    if arr.size and not np.all(np.isfinite(arr)):
+        raise ValueError("audio must contain only finite samples")
+    return arr.astype(np.float32, copy=False)
 
 
 def ms_to_samples(sample_rate: int, ms: float) -> int:
@@ -27,10 +29,20 @@ def samples_to_ms(sample_rate: int, samples: int) -> float:
 
 
 def silence(sample_rate: int, ms: float) -> Audio:
-    count = ms_to_samples(sample_rate, ms)
-    if ms > 0:
-        count = max(1, count)
-    return np.zeros(count, dtype=np.float32)
+    if ms <= 0:
+        return np.zeros(0, dtype=np.float32)
+
+    return np.zeros(max(1, ms_to_samples(sample_rate, ms)), dtype=np.float32)
+
+
+def concatenate_audio(parts: list[object] | tuple[object, ...]) -> Audio:
+    chunks = [to_mono_float32(part) for part in parts]
+    chunks = [chunk for chunk in chunks if chunk.size]
+
+    if not chunks:
+        return np.zeros(0, dtype=np.float32)
+
+    return np.concatenate(chunks).astype(np.float32, copy=False)
 
 
 def write_wav(path: str | os.PathLike[str], audio: object, sample_rate: int) -> None:
@@ -117,37 +129,37 @@ def fade_in(audio: Audio, fade_samples: int) -> Audio:
         return out
 
     n = min(fade_samples, out.size)
-    out[:n] *= np.linspace(0.0, 1.0, n, dtype=np.float32)
+    if n == 1:
+        out[0] *= 1.0
+        return out
 
+    out[:n] *= np.linspace(0.0, 1.0, n, dtype=np.float32)
     return out
 
 
-def envelope_features(
-    audio: Audio,
-    sample_rate: int,
-    *,
-    hop_ms: float,
-    win_ms: float,
-) -> tuple[npt.NDArray[np.float64], int]:
-    hop = max(1, ms_to_samples(sample_rate, hop_ms))
-    win = max(1, ms_to_samples(sample_rate, win_ms))
+def fade_out(audio: Audio, fade_samples: int) -> Audio:
+    out = audio.copy()
+    if out.size == 0 or fade_samples <= 0:
+        return out
 
-    samples, starts = _frame_inputs(audio, frame_size=win, hop=hop)
-    if starts.size == 0:
-        return np.empty((0, 2), dtype=np.float64), hop
+    n = min(fade_samples, out.size)
+    if n == 1:
+        out[0] *= 1.0
+        return out
 
-    windows = np.lib.stride_tricks.sliding_window_view(samples, win)
-    frames = windows[starts]
+    out[-n:] *= np.linspace(1.0, 0.0, n, dtype=np.float32)
+    return out
 
-    rms = np.sqrt(np.mean(frames * frames, axis=1))
-    db = 20.0 * np.log10(np.maximum(rms, 1e-8))
-    db_norm = (np.clip(db, -80.0, 0.0) + 80.0) / 80.0
 
-    if win > 1:
-        signs = np.signbit(frames)
-        crossings = signs[:, 1:] != signs[:, :-1]
-        zcr = np.sum(crossings, axis=1) / (win - 1)
-    else:
-        zcr = np.zeros(starts.size, dtype=np.float64)
+def equal_power_crossfade(left: object, right: object) -> Audio:
+    left_samples = to_mono_float32(left)
+    right_samples = to_mono_float32(right)
+    n = min(left_samples.size, right_samples.size)
 
-    return np.column_stack((db_norm, zcr * 0.25)), hop
+    if n == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    theta = np.linspace(0.0, np.pi / 2.0, n, dtype=np.float32)
+    faded = left_samples[-n:] * np.cos(theta) + right_samples[:n] * np.sin(theta)
+
+    return faded.astype(np.float32, copy=False)

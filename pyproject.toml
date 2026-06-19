@@ -1,7 +1,7 @@
 [project]
 name = "tts-prefix-cache"
 version = "0.1.0"
-description = "Add your description here"
+description = "Low-latency audio prefix splicing for speech and TTS pipelines"
 requires-python = ">=3.11"
 dependencies = [
     "dtw-python>=1.5.3",

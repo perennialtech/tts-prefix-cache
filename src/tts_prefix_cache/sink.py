@@ -24,12 +24,14 @@ class BufferedWavSink:
     def audio(self) -> Audio:
         if not self._chunks:
             return np.zeros(0, dtype=np.float32)
+
         return np.concatenate(self._chunks).astype(np.float32, copy=False)
 
     async def write(self, chunk: Audio) -> None:
         audio = to_mono_float32(chunk)
         if audio.size:
             self._chunks.append(audio.copy())
+
         await asyncio.sleep(0)
 
     def save(self) -> int:

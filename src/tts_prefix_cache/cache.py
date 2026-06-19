@@ -1,34 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Callable, Coroutine, Hashable
+from typing import Any, Generic, TypeVar
 
-from ._boundary import PrefixClip
-from .config import CacheStatus, Voice
+from .config import CacheStatus
 
-
-@dataclass(frozen=True)
-class PrefixKey:
-    text: str
-    voice: Voice
-    sample_rate: int
-    prefix_trim_keep_ms: float
-    dtw_trim_keep_ms: float
-    silence_threshold_db: float
+K = TypeVar("K", bound=Hashable)
+V = TypeVar("V")
 
 
-class MemoryPrefixCache:
+class MemoryPrefixCache(Generic[K, V]):
     def __init__(self) -> None:
-        self._tasks: dict[PrefixKey, asyncio.Task[PrefixClip]] = {}
+        self._tasks: dict[K, asyncio.Task[V]] = {}
         self._lock = asyncio.Lock()
 
     async def get_or_create(
         self,
-        key: PrefixKey,
-        factory: Callable[[], Coroutine[Any, Any, PrefixClip]],
-    ) -> tuple[PrefixClip, CacheStatus]:
+        key: K,
+        factory: Callable[[], Coroutine[Any, Any, V]],
+    ) -> tuple[V, CacheStatus]:
         async with self._lock:
             task = self._tasks.get(key)
             status: CacheStatus | None = None

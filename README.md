@@ -1,12 +1,85 @@
 # tts-prefix-cache
 
-Low-latency helper for text-to-speech systems where a stable prefix can be cached and played immediately while the full utterance is synthesized in the background.
+Low-latency audio prefix splicing for speech and text-to-speech systems.
 
-The library:
+The core library is provider-agnostic. It works with generic speech audio:
 
-1. Synthesizes and caches a prefix clip.
-2. Starts full utterance synthesis in parallel.
-3. Streams the cached prefix to an audio sink.
-4. Inserts same-stream silence if the full synthesis is not ready yet.
-5. Finds a splice boundary in the full audio using DTW plus nearby silence detection.
-6. Streams the generated continuation.
+1. Prepare and cache audio for the beginning of an utterance.
+2. Generate or receive full utterance audio later.
+3. Align the cached prefix against the full utterance using speech features and DTW.
+4. Pick a splice boundary using alignment, energy, quiet-run, and sample-amplitude scoring.
+5. Return a continuation, or create a stitched output with crossfade.
+
+The important invariant is audio-level, not provider-level:
+
+> The cached prefix audio must be an acoustic rendering of the beginning of the full utterance audio.
+
+Same speaker, same engine, same settings, and same spoken prefix content produce the best results.
+
+## Core usage
+
+```py
+from tts_prefix_cache import (
+    SpliceConfig,
+    prepare_prefix_audio,
+    splice_from_full_audio,
+)
+
+config = SpliceConfig()
+prepared = prepare_prefix_audio(prefix_audio, sample_rate=24000, config=config)
+
+splice = splice_from_full_audio(
+    prefix=prepared,
+    full_audio=full_utterance_audio,
+    sample_rate=24000,
+    config=config,
+)
+
+continuation = splice.continuation
+boundary = splice.boundary
+```
+
+## Offline stitching
+
+```py
+from tts_prefix_cache import stitch_audio
+
+stitched_audio, splice = stitch_audio(
+    prefix=prepared,
+    full_audio=full_utterance_audio,
+    sample_rate=24000,
+    config=config,
+)
+```
+
+## Streaming TTS helper
+
+The optional `PrefixSpeaker` wrapper keeps TTS orchestration thin. It still does not care about providers.
+
+```py
+from tts_prefix_cache import BufferedWavSink, PrefixSpeaker, PrefixSpeakerConfig
+
+speaker = PrefixSpeaker(
+    tts=my_synthesizer,
+    config=PrefixSpeakerConfig(sample_rate=24000),
+)
+
+sink = BufferedWavSink(path="out.wav", sample_rate=24000)
+
+result = await speaker.speak(
+    prefix="Sure, I can help with that.",
+    rest=" First, open the settings menu.",
+    sink=sink,
+)
+
+sink.save()
+```
+
+A synthesizer only needs to implement:
+
+```py
+async def synthesize(self, text: str, *, sample_rate: int) -> Audio:
+    ...
+```
+
+Provider SDKs, auth, retries, formats, and decoding belong outside this package.
