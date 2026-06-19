@@ -1,132 +1,161 @@
 # tts-prefix-cache
 
-Low-latency audio prefix splicing for speech and text-to-speech systems.
+Low-latency audio prefix splicing for speech and TTS pipelines.
 
-The core library is provider-agnostic. It works with generic speech audio:
+`tts-prefix-cache` lets you play a cached synthesized prefix immediately while a full utterance is being generated in the background, then splice into the generated continuation once it is ready.
 
-1. Prepare and cache audio for the beginning of an utterance.
-2. Generate or receive full utterance audio later.
-3. Align the cached prefix against the full utterance using speech features and DTW.
-4. Pick a splice boundary using alignment, energy, quiet-run, and sample-amplitude scoring.
-5. Return a continuation, or create a stitched output with crossfade.
+## When to use this
 
-The important invariant is audio-level, not provider-level:
+Use this package when your application often starts responses with repeated text, such as:
 
-> The cached prefix audio must be an acoustic rendering of the beginning of the full utterance audio.
+- “Sure —”
+- “Let me check that.”
+- “One moment while I look that up.”
+- branded greetings or fixed assistant preambles
 
-Same speaker, same engine, same settings, and same spoken prefix content produce the best results.
+Instead of waiting for the whole utterance to synthesize, you can cache the prefix audio and start streaming it immediately.
 
-## Core usage
+## Install
 
-```py
-from tts_prefix_cache import (
-    SpliceConfig,
-    prepare_prefix_audio,
-    splice_from_full_audio,
-)
+From this repository:
 
-config = SpliceConfig()
-prepared = prepare_prefix_audio(prefix_audio, sample_rate=24000, config=config)
-
-splice = splice_from_full_audio(
-    prefix=prepared,
-    full_audio=full_utterance_audio,
-    sample_rate=24000,
-    config=config,
-)
-
-continuation = splice.continuation
-boundary = splice.boundary
+```bash
+pip install .
 ```
 
-## Offline stitching
+For local development with `uv`:
 
-```py
-from tts_prefix_cache import stitch_audio
-
-stitched_audio, splice = stitch_audio(
-    prefix=prepared,
-    full_audio=full_utterance_audio,
-    sample_rate=24000,
-    config=config,
-)
+```bash
+uv sync
 ```
 
-## Streaming TTS helper
+## Audio contract
 
-The optional `PrefixSpeaker` wrapper keeps TTS orchestration thin. It still does not care about providers.
+The synthesizer you provide should return mono, one-dimensional `numpy.float32` audio at the requested sample rate.
 
-```py
+Audio samples are expected to be normal floating-point PCM-style samples. Helpers are available for WAV writing and PCM16LE conversion.
+
+## Quick start
+
+```python
+import asyncio
+import numpy as np
+
 from tts_prefix_cache import BufferedWavSink, PrefixSpeaker, PrefixSpeakerConfig
 
-speaker = PrefixSpeaker(
-    tts=my_synthesizer,
-    config=PrefixSpeakerConfig(sample_rate=24000),
-)
 
-sink = BufferedWavSink(path="out.wav", sample_rate=24000)
+class MySynthesizer:
+    async def synthesize(self, text: str, *, sample_rate: int) -> np.ndarray:
+        # Replace this with your TTS provider call.
+        duration_seconds = max(0.2, len(text) * 0.03)
+        samples = int(sample_rate * duration_seconds)
 
-result = await speaker.speak(
-    prefix="Sure, I can help with that.",
-    rest=" First, open the settings menu.",
+        # Demo placeholder audio.
+        t = np.linspace(0, duration_seconds, samples, endpoint=False)
+        return (0.1 * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+
+
+async def main() -> None:
+    speaker = PrefixSpeaker(
+        tts=MySynthesizer(),
+        config=PrefixSpeakerConfig(sample_rate=24_000),
+    )
+
+    sink = BufferedWavSink(path="out/response.wav", sample_rate=24_000)
+
+    result = await speaker.speak(
+        prefix="Sure — ",
+        rest="I can help with that.",
+        sink=sink,
+    )
+
+    sink.save()
+    print(result)
+
+
+asyncio.run(main())
+```
+
+## Streaming audio chunks
+
+Use `audio_stream` when you want NumPy audio chunks:
+
+```python
+async for chunk in speaker.audio_stream(
+    prefix="Sure — ",
+    rest="I can help with that.",
+):
+    send_audio_chunk(chunk)
+```
+
+Use `pcm16le_stream` when your transport expects raw little-endian 16-bit PCM bytes:
+
+```python
+async for data in speaker.pcm16le_stream(
+    prefix="Sure — ",
+    rest="I can help with that.",
+):
+    send_bytes(data)
+```
+
+## Prewarming prefixes
+
+You can synthesize and cache a prefix before it is needed:
+
+```python
+await speaker.prewarm_prefix("Sure — ")
+```
+
+If your application has its own stable cache identifiers, pass a key:
+
+```python
+await speaker.prewarm_prefix("Sure — ", key=("voice-a", "sure"))
+```
+
+Use the same key when speaking:
+
+```python
+await speaker.speak(
+    prefix="Sure — ",
+    rest="I can help with that.",
+    key=("voice-a", "sure"),
     sink=sink,
 )
-
-sink.save()
 ```
 
-A synthesizer only needs to implement:
+## Custom sinks
 
-```py
-async def synthesize(self, text: str, *, sample_rate: int) -> Audio:
-    ...
+A sink only needs an async `write` method that accepts an audio chunk:
+
+```python
+class MySink:
+    async def write(self, chunk: np.ndarray) -> None:
+        ...
 ```
 
-Provider SDKs, auth, retries, formats, and decoding belong outside this package.
+Then pass it to `speak`:
 
-## FastAPI streaming
-
-`PrefixSpeaker` also exposes async iterators for HTTP streaming. The package does not depend on FastAPI.
-
-```py
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-
-from tts_prefix_cache import PrefixSpeaker, PrefixSpeakerConfig
-
-app = FastAPI()
-
-
-class SpeakRequest(BaseModel):
-    prefix: str
-    rest: str
-    key: str | None = None
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    app.state.speaker = PrefixSpeaker(
-        tts=my_synthesizer,
-        config=PrefixSpeakerConfig(
-            sample_rate=24000,
-            pace_audio=False,
-        ),
-    )
-
-
-@app.post("/speak.pcm")
-async def speak_pcm(req: SpeakRequest):
-    speaker: PrefixSpeaker = app.state.speaker
-
-    return StreamingResponse(
-        speaker.pcm16le_stream(
-            prefix=req.prefix,
-            rest=req.rest,
-            key=req.key,
-        ),
-        media_type="audio/x-raw; format=S16LE; rate=24000; channels=1",
-    )
+```python
+await speaker.speak(
+    prefix="Sure — ",
+    rest="I can help with that.",
+    sink=MySink(),
+)
 ```
 
-For realtime sinks, keep `pace_audio=True`. For HTTP responses where the client/player handles buffering, `pace_audio=False` avoids artificial server-side playback pacing.
+## Configuration
+
+Runtime behavior is configured with `PrefixSpeakerConfig` and its nested splice configuration.
+
+Prefer constructing those dataclasses directly in code so your editor and type checker can use the package’s type definitions as the source of truth:
+
+```python
+from tts_prefix_cache import PrefixSpeakerConfig, SpliceConfig
+
+config = PrefixSpeakerConfig(
+    sample_rate=24_000,
+    splice=SpliceConfig(
+        crossfade_ms=30.0,
+    ),
+)
+```
