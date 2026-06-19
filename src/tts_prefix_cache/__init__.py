@@ -1,34 +1,22 @@
-from .audio import (Audio, as_audio_array, envelope_features, fade_in,
-                    frame_db, ms_to_samples, samples_to_ms, silence,
-                    trim_trailing_silence_keep, write_wav)
-from .boundary import BoundaryDetector
-from .cache import PrefixCache, prefix_cache_key
-from .config import (BoundaryConfig, BoundaryResult, PlaybackConfig,
-                     Synthesizer, VoiceParams)
-from .sink import BufferedWavSink, write_paced
-from .speaker import CachedPrefixSpeaker, synthesize_cached_prefix_audio
+from ._audio import Audio
+from .cache import MemoryPrefixCache
+from .config import (AudioSink, BoundaryConfig, BoundaryResult,
+                     PrefixSpeakerConfig, SpeakResult, Synthesizer, Voice)
+from .sink import BufferedWavSink, stream_audio, write_wav
+from .speaker import PrefixSpeaker
 
 __all__ = [
     "Audio",
-    "as_audio_array",
-    "envelope_features",
-    "fade_in",
-    "frame_db",
-    "ms_to_samples",
-    "samples_to_ms",
-    "silence",
-    "trim_trailing_silence_keep",
-    "write_wav",
-    "BoundaryDetector",
-    "PrefixCache",
-    "prefix_cache_key",
-    "BoundaryConfig",
-    "BoundaryResult",
-    "PlaybackConfig",
+    "Voice",
     "Synthesizer",
-    "VoiceParams",
+    "AudioSink",
+    "BoundaryConfig",
+    "PrefixSpeakerConfig",
+    "BoundaryResult",
+    "SpeakResult",
+    "PrefixSpeaker",
+    "MemoryPrefixCache",
     "BufferedWavSink",
-    "write_paced",
-    "CachedPrefixSpeaker",
-    "synthesize_cached_prefix_audio",
+    "stream_audio",
+    "write_wav",
 ]

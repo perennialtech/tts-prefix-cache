@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 import numpy as np
 
-from .audio import (Audio, as_audio_array, ms_to_samples, samples_to_ms,
-                    write_wav)
+from ._audio import (Audio, ms_to_samples, samples_to_ms, to_mono_float32,
+                     write_wav)
+from .config import AudioSink
 
 Logger = Callable[[str], None]
+Sleep = Callable[[float], Awaitable[None]]
 
 
 class BufferedWavSink:
-    def __init__(self, *, path: str, sr: int):
-        self.path = path
-        self.sr = sr
+    def __init__(self, *, path: str | Path, sample_rate: int):
+        self.path = Path(path)
+        self.sample_rate = sample_rate
         self._chunks: list[Audio] = []
 
     @property
@@ -23,37 +26,40 @@ class BufferedWavSink:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(self._chunks).astype(np.float32, copy=False)
 
-    async def write(self, chunk: Audio | Sequence[float]) -> None:
-        chunk_audio = as_audio_array(chunk)
-        if chunk_audio.size:
-            self._chunks.append(chunk_audio.copy())
+    async def write(self, chunk: Audio) -> None:
+        audio = to_mono_float32(chunk)
+        if audio.size:
+            self._chunks.append(audio.copy())
         await asyncio.sleep(0)
 
     def save(self) -> int:
         audio = self.audio
-        write_wav(self.path, audio, self.sr)
+        write_wav(self.path, audio, self.sample_rate)
         return len(audio)
 
 
-async def write_paced(
+async def stream_audio(
     *,
-    sink: BufferedWavSink,
+    sink: AudioSink,
     audio: Audio,
-    sr: int,
-    label: str,
+    sample_rate: int,
     chunk_ms: float,
+    label: str | None = None,
     logger: Logger | None = None,
+    sleep: Sleep = asyncio.sleep,
 ) -> None:
-    chunk_n = max(1, ms_to_samples(sr, chunk_ms))
-    total_ms = samples_to_ms(sr, len(audio))
+    samples = to_mono_float32(audio)
+    chunk_n = max(1, ms_to_samples(sample_rate, chunk_ms))
 
-    if logger is not None:
-        logger(f"[stream] start {label}, {total_ms:.1f} ms")
+    if logger is not None and label is not None:
+        logger(
+            f"[stream] start {label}, {samples_to_ms(sample_rate, len(samples)):.1f} ms"
+        )
 
-    for start in range(0, len(audio), chunk_n):
-        chunk = audio[start : start + chunk_n]
+    for start in range(0, len(samples), chunk_n):
+        chunk = samples[start : start + chunk_n]
         await sink.write(chunk)
-        await asyncio.sleep(len(chunk) / sr)
+        await sleep(len(chunk) / sample_rate)
 
-    if logger is not None:
+    if logger is not None and label is not None:
         logger(f"[stream] end {label}")

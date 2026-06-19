@@ -1,217 +1,238 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from pathlib import Path
 
-from .audio import (Audio, fade_in, ms_to_samples, samples_to_ms, silence,
-                    write_wav)
-from .boundary import BoundaryDetector
-from .cache import PrefixCache, prefix_cache_key
-from .config import (BoundaryConfig, BoundaryResult, PlaybackConfig,
-                     Synthesizer, VoiceParams)
-from .sink import BufferedWavSink, write_paced
+from ._audio import (Audio, samples_to_ms, silence, to_mono_float32,
+                     trim_trailing_silence_keep, write_wav)
+from ._boundary import PrefixClip, _frame_size_and_hop, splice_continuation
+from .cache import MemoryPrefixCache, PrefixKey
+from .config import (AudioSink, BoundaryConfig, CacheStatus,
+                     PrefixSpeakerConfig, SpeakResult, Synthesizer, Voice)
+from .sink import stream_audio
 
 Logger = Callable[[str], None]
+Sleep = Callable[[float], Awaitable[None]]
 
 
-async def synthesize_cached_prefix_audio(
+async def _build_prefix_clip(
     *,
     tts: Synthesizer,
     prefix: str,
-    voice: VoiceParams,
-    sr: int,
+    voice: Voice,
+    sample_rate: int,
     boundary_config: BoundaryConfig,
-) -> Audio:
-    audio = await tts.synthesize(prefix, voice)
+) -> PrefixClip:
+    raw = to_mono_float32(await tts.synthesize(prefix, voice, sample_rate=sample_rate))
+    frame_size, hop = _frame_size_and_hop(sample_rate, boundary_config)
 
-    from .audio import trim_trailing_silence_keep
-
-    return trim_trailing_silence_keep(
-        audio,
-        sr,
+    playback_audio = trim_trailing_silence_keep(
+        raw,
+        sample_rate,
         threshold_db=boundary_config.silence_threshold_db,
         keep_ms=boundary_config.prefix_trim_keep_ms,
-        frame_size=boundary_config.frame_size,
-        hop=boundary_config.hop,
+        frame_size=frame_size,
+        hop=hop,
+    )
+    match_audio = trim_trailing_silence_keep(
+        raw,
+        sample_rate,
+        threshold_db=boundary_config.silence_threshold_db,
+        keep_ms=boundary_config.dtw_trim_keep_ms,
+        frame_size=frame_size,
+        hop=hop,
     )
 
+    return PrefixClip(playback_audio=playback_audio, match_audio=match_audio)
 
-def dump_debug_wavs(
+
+def _dump_debug_wavs(
     *,
-    debug_dir: str,
-    sr: int,
-    tracks: dict[str, Audio],
+    debug_dir: Path,
+    sample_rate: int,
+    prefix: PrefixClip,
+    full_audio: Audio,
+    continuation: Audio,
 ) -> None:
-    os.makedirs(debug_dir, exist_ok=True)
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    write_wav(debug_dir / "debug_cached_prefix.wav", prefix.playback_audio, sample_rate)
+    write_wav(debug_dir / "debug_full_raw.wav", full_audio, sample_rate)
+    write_wav(debug_dir / "debug_continuation_after_cut.wav", continuation, sample_rate)
 
-    for filename, audio in tracks.items():
-        write_wav(os.path.join(debug_dir, filename), audio, sr)
 
-
-class CachedPrefixSpeaker:
+class PrefixSpeaker:
     def __init__(
         self,
         *,
         tts: Synthesizer,
-        cache: PrefixCache[Audio],
-        sink: BufferedWavSink,
-        voice: VoiceParams,
-        playback_config: PlaybackConfig,
-        boundary_config: BoundaryConfig,
+        voice: Voice,
+        config: PrefixSpeakerConfig | None = None,
+        cache: MemoryPrefixCache | None = None,
         logger: Logger | None = None,
+        sleep: Sleep = asyncio.sleep,
     ):
         self.tts = tts
-        self.cache = cache
-        self.sink = sink
         self.voice = voice
-        self.playback = playback_config
-        self.boundary_config = boundary_config
-        self.boundary_detector = BoundaryDetector(
-            sr=playback_config.sr,
-            config=boundary_config,
-        )
+        self.config = config or PrefixSpeakerConfig()
+        self.cache = cache or MemoryPrefixCache()
         self.logger = logger
+        self._sleep = sleep
 
     async def prewarm_prefix(self, prefix: str) -> None:
-        await self._get_cached_prefix(prefix)
+        await self._get_prefix_clip(prefix)
 
-    async def speak(self, *, prefix: str, rest: str) -> BoundaryResult:
+    async def speak(
+        self,
+        *,
+        prefix: str,
+        rest: str,
+        sink: AudioSink,
+    ) -> SpeakResult:
         full_text = prefix + rest
         synth_start = time.perf_counter()
-        full_task = asyncio.create_task(self.tts.synthesize(full_text, self.voice))
-        full_audio: Audio | None = None
-        synth_elapsed_ms: float | None = None
+        full_task = asyncio.create_task(self._synthesize(full_text))
 
         self._log("[synth] started full synthesis in background")
 
         try:
-            cached_prefix_audio = await self._get_cached_prefix(prefix)
+            prefix_clip, cache_status = await self._get_prefix_clip(prefix)
 
-            if full_task.done():
-                full_audio = await full_task
-                synth_elapsed_ms = (time.perf_counter() - synth_start) * 1000.0
-
-            await write_paced(
-                sink=self.sink,
-                audio=cached_prefix_audio,
-                sr=self.playback.sr,
+            await stream_audio(
+                sink=sink,
+                audio=prefix_clip.playback_audio,
+                sample_rate=self.config.sample_rate,
+                chunk_ms=self.config.chunk_ms,
                 label="cached prefix",
-                chunk_ms=self.playback.chunk_ms,
                 logger=self.logger,
+                sleep=self._sleep,
             )
 
-            silence_written = 0
-            if full_audio is None:
-                silence_written = await self._write_silence_until_ready(full_task)
-                full_audio = await full_task
-                synth_elapsed_ms = (time.perf_counter() - synth_start) * 1000.0
+            full_audio, silence_samples = await self._await_full_audio(
+                task=full_task,
+                sink=sink,
+            )
+            synth_elapsed_ms = (time.perf_counter() - synth_start) * 1000.0
 
             self._log(f"[synth] full audio ready after {synth_elapsed_ms:.1f} ms")
 
-            if silence_written:
+            if silence_samples:
                 self._log(
                     "[stream] latency silence added, "
-                    f"{samples_to_ms(self.playback.sr, silence_written):.1f} ms"
+                    f"{samples_to_ms(self.config.sample_rate, silence_samples):.1f} ms"
                 )
 
-            boundary = self.boundary_detector.find_cut(
-                cached_prefix_audio=cached_prefix_audio,
+            splice = splice_continuation(
+                prefix=prefix_clip,
                 full_audio=full_audio,
+                sample_rate=self.config.sample_rate,
+                config=self.config.boundary,
             )
 
             self._log(
                 "[boundary] cut at "
-                f"{samples_to_ms(self.playback.sr, boundary.cut_sample):.1f} ms "
-                f"into full audio using {boundary.method}"
+                f"{samples_to_ms(self.config.sample_rate, splice.boundary.cut_sample):.1f} ms "
+                f"into full audio using {splice.boundary.method}"
             )
 
-            continuation = fade_in(
-                full_audio[boundary.cut_sample :],
-                fade_samples=ms_to_samples(
-                    self.playback.sr,
-                    self.boundary_config.continuation_fade_in_ms,
-                ),
-            )
-
-            if self.playback.dump_debug:
-                dump_debug_wavs(
-                    debug_dir=self.playback.debug_dir,
-                    sr=self.playback.sr,
-                    tracks={
-                        "debug_cached_prefix.wav": cached_prefix_audio,
-                        "debug_full_raw.wav": full_audio,
-                        "debug_continuation_after_cut.wav": continuation,
-                    },
+            if self.config.debug_dir is not None:
+                _dump_debug_wavs(
+                    debug_dir=self.config.debug_dir,
+                    sample_rate=self.config.sample_rate,
+                    prefix=prefix_clip,
+                    full_audio=full_audio,
+                    continuation=splice.continuation,
                 )
-                self._log(f"[debug] wrote debug WAVs to {self.playback.debug_dir}")
+                self._log(f"[debug] wrote debug WAVs to {self.config.debug_dir}")
 
-            await write_paced(
-                sink=self.sink,
-                audio=continuation,
-                sr=self.playback.sr,
+            await stream_audio(
+                sink=sink,
+                audio=splice.continuation,
+                sample_rate=self.config.sample_rate,
+                chunk_ms=self.config.chunk_ms,
                 label="generated continuation",
-                chunk_ms=self.playback.chunk_ms,
                 logger=self.logger,
+                sleep=self._sleep,
             )
 
-            return boundary
+            return SpeakResult(
+                boundary=splice.boundary,
+                cache_status=cache_status,
+                silence_samples=silence_samples,
+                synth_elapsed_ms=synth_elapsed_ms,
+            )
 
         finally:
-            if full_task.done():
-                with suppress(asyncio.CancelledError, Exception):
-                    full_task.result()
-            else:
+            if not full_task.done():
                 full_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await full_task
+            with suppress(asyncio.CancelledError, Exception):
+                await full_task
 
-    async def _get_cached_prefix(self, prefix: str) -> Audio:
-        key = prefix_cache_key(prefix, self.voice)
-        was_cached = key in self.cache
+    async def _synthesize(self, text: str) -> Audio:
+        return to_mono_float32(
+            await self.tts.synthesize(
+                text,
+                self.voice,
+                sample_rate=self.config.sample_rate,
+            )
+        )
 
-        if was_cached:
-            self._log("[goblin cache] hit, cached prefix is ready immediately")
-        else:
-            self._log("[goblin cache] miss, synthesizing prefix once")
+    async def _get_prefix_clip(self, prefix: str) -> tuple[PrefixClip, CacheStatus]:
+        key = PrefixKey(
+            text=prefix,
+            voice=self.voice,
+            sample_rate=self.config.sample_rate,
+            prefix_trim_keep_ms=self.config.boundary.prefix_trim_keep_ms,
+            dtw_trim_keep_ms=self.config.boundary.dtw_trim_keep_ms,
+            silence_threshold_db=self.config.boundary.silence_threshold_db,
+        )
 
-        audio = await self.cache.get_or_create(
+        clip, status = await self.cache.get_or_create(
             key,
-            lambda: synthesize_cached_prefix_audio(
+            lambda: _build_prefix_clip(
                 tts=self.tts,
                 prefix=prefix,
                 voice=self.voice,
-                sr=self.playback.sr,
-                boundary_config=self.boundary_config,
+                sample_rate=self.config.sample_rate,
+                boundary_config=self.config.boundary,
             ),
         )
 
-        if not was_cached:
+        if status == "hit":
+            self._log("[prefix cache] hit")
+        elif status == "joined":
+            self._log("[prefix cache] joined in-flight prefix synthesis")
+        else:
             self._log(
-                f"[goblin cache] stored prefix, "
-                f"{samples_to_ms(self.playback.sr, len(audio)):.1f} ms"
+                "[prefix cache] miss, synthesized and stored prefix, "
+                f"{samples_to_ms(self.config.sample_rate, len(clip.playback_audio)):.1f} ms"
             )
 
-        return audio
+        return clip, status
 
-    async def _write_silence_until_ready(self, task: asyncio.Task[Audio]) -> int:
+    async def _await_full_audio(
+        self,
+        *,
+        task: asyncio.Task[Audio],
+        sink: AudioSink,
+    ) -> tuple[Audio, int]:
         silence_chunk = silence(
-            self.playback.sr,
-            self.playback.latency_silence_chunk_ms,
+            self.config.sample_rate,
+            self.config.wait_silence_chunk_ms,
         )
-        silence_written = 0
+        silence_samples = 0
 
         while not task.done():
-            if silence_written == 0:
+            if silence_samples == 0:
                 self._log("[stream] full synth not ready, adding same-stream silence")
 
-            await self.sink.write(silence_chunk)
-            silence_written += len(silence_chunk)
-            await asyncio.sleep(self.playback.latency_silence_chunk_ms / 1000.0)
+            await sink.write(silence_chunk)
+            silence_samples += len(silence_chunk)
+            await self._sleep(self.config.wait_silence_chunk_ms / 1000.0)
 
-        return silence_written
+        return await task, silence_samples
 
     def _log(self, message: str) -> None:
         if self.logger is not None:
