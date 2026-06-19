@@ -3,8 +3,14 @@
 tts_prefix_cache_poc.py
 
 Standalone proof-of-concept for fixed cached-prefix TTS playback with
-audio-only continuation splicing. The fake TTS backend keeps this file runnable
-without external services; replace FakeTTS.synthesize() when integrating.
+audio-only continuation splicing.
+
+Boundary estimation is DTW-only and uses dtw-python instead of an in-file DTW
+implementation. The fake TTS backend keeps this file runnable without external
+services; replace FakeTTS.synthesize() when integrating.
+
+Dependencies:
+    pip install numpy dtw-python
 """
 
 import argparse
@@ -17,6 +23,15 @@ import time
 import wave
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Generic, Protocol, TypeVar
+
+try:
+    import numpy as np
+    from dtw import dtw as dtw_align
+except ImportError as exc:
+    raise RuntimeError(
+        "tts_prefix_cache_poc.py requires numpy and dtw-python. "
+        "Install them with: pip install numpy dtw-python"
+    ) from exc
 
 Audio = list[float]
 T = TypeVar("T")
@@ -63,7 +78,6 @@ class BoundaryConfig:
     dtw_win_ms: float = 30.0
     dtw_max_search_multiplier: float = 1.8
     dtw_max_search_extra_ms: float = 600.0
-    dtw_min_endpoint_ratio: float = 0.55
 
 
 @dataclass(frozen=True)
@@ -73,7 +87,6 @@ class RunConfig:
     out: str = "poc_output.wav"
     sr: int = 24000
     chunk_ms: float = 40.0
-    use_dtw: bool = False
     dump_debug: bool = False
     debug_dir: str = "poc_debug"
     prewarm: bool = True
@@ -433,47 +446,35 @@ def envelope_features(
     *,
     hop_ms: float,
     win_ms: float,
-) -> tuple[list[tuple[float, float]], int]:
+) -> tuple[np.ndarray, int]:
     hop = max(1, ms_to_samples(sr, hop_ms))
     win = max(1, ms_to_samples(sr, win_ms))
 
     if not audio:
-        return [], hop
+        return np.empty((0, 2), dtype=np.float64), hop
 
-    feats: list[tuple[float, float]] = []
+    samples = np.asarray(audio, dtype=np.float64)
+    frame_count = max(1, (len(samples) + hop - 1) // hop)
+    padded_len = (frame_count - 1) * hop + win
 
-    for start in range(0, len(audio), hop):
-        end = min(start + win, len(audio))
+    if len(samples) < padded_len:
+        samples = np.pad(samples, (0, padded_len - len(samples)))
 
-        energy = 0.0
-        for i in range(start, end):
-            energy += audio[i] * audio[i]
+    frames = np.lib.stride_tricks.sliding_window_view(samples, win)[::hop][:frame_count]
 
-        energy /= win
-        rms = math.sqrt(max(energy, 0.0))
-        db = 20.0 * math.log10(max(rms, 1e-8))
-        db_norm = (clamp(db, -80.0, 0.0) + 80.0) / 80.0
+    rms = np.sqrt(np.mean(frames * frames, axis=1))
+    db = 20.0 * np.log10(np.maximum(rms, 1e-8))
+    db_norm = (np.clip(db, -80.0, 0.0) + 80.0) / 80.0
 
-        crossings = 0
-        prev = audio[start]
+    if win > 1:
+        crossings = np.signbit(frames[:, 1:]) != np.signbit(frames[:, :-1])
+        zcr = np.sum(crossings, axis=1) / (win - 1)
+    else:
+        zcr = np.zeros(frame_count, dtype=np.float64)
 
-        for offset in range(1, win):
-            idx = start + offset
-            x = audio[idx] if idx < len(audio) else 0.0
-
-            if (prev >= 0.0 and x < 0.0) or (prev < 0.0 and x >= 0.0):
-                crossings += 1
-
-            prev = x
-
-        zcr = crossings / max(1, win - 1)
-        feats.append((db_norm, zcr))
-
-    return feats, hop
-
-
-def feature_cost(a: tuple[float, float], b: tuple[float, float]) -> float:
-    return abs(a[0] - b[0]) + 0.25 * abs(a[1] - b[1])
+    # Use cityblock distance in dtw-python. Scaling zcr preserves the old
+    # envelope-vs-zero-crossing weighting without custom distance code.
+    return np.column_stack((db_norm, zcr * 0.25)), hop
 
 
 # ---------------------------------------------------------------------------
@@ -491,22 +492,11 @@ class BoundaryDetector:
         *,
         cached_prefix_audio: Audio,
         full_audio: Audio,
-        use_dtw: bool,
     ) -> BoundaryResult:
-        expected = len(cached_prefix_audio)
-        expected_method = "cached-prefix-duration"
-
-        if use_dtw:
-            try:
-                expected = self._envelope_dtw_prefix_end_estimate(
-                    cached_prefix_audio=cached_prefix_audio,
-                    full_audio=full_audio,
-                )
-                expected_method = "rough-envelope-dtw"
-            except Exception as exc:
-                print(
-                    f"[boundary] DTW failed, falling back to duration estimate: {exc}"
-                )
+        expected = self._dtw_prefix_end_estimate(
+            cached_prefix_audio=cached_prefix_audio,
+            full_audio=full_audio,
+        )
 
         # The splice is deliberately searched inside/near silence instead of
         # cutting arbitrary speech samples.
@@ -516,14 +506,14 @@ class BoundaryDetector:
         )
 
         if cut is not None:
-            return BoundaryResult(cut, f"{expected_method}+nearby-silence")
+            return BoundaryResult(cut, "dtw+nearby-silence")
 
         cut = self._snap_to_low_amplitude_point(
             audio=full_audio,
             center_sample=expected,
         )
 
-        return BoundaryResult(cut, f"{expected_method}+low-amplitude-fallback")
+        return BoundaryResult(cut, "dtw+low-amplitude-fallback")
 
     def _find_quiet_boundary_near(
         self,
@@ -627,14 +617,12 @@ class BoundaryDetector:
 
         return best_i
 
-    def _envelope_dtw_prefix_end_estimate(
+    def _dtw_prefix_end_estimate(
         self,
         *,
         cached_prefix_audio: Audio,
         full_audio: Audio,
     ) -> int:
-        # DTW is only a rough audio-only estimate; silence search still chooses
-        # the final splice point.
         prefix_for_match = trim_trailing_silence_keep(
             cached_prefix_audio,
             self.sr,
@@ -666,48 +654,21 @@ class BoundaryDetector:
             win_ms=self.config.dtw_win_ms,
         )
 
-        m = len(x_feats)
-        n = len(y_feats)
+        if len(x_feats) == 0 or len(y_feats) == 0:
+            raise ValueError("not enough audio for DTW boundary estimation")
 
-        if m == 0 or n == 0:
-            raise ValueError("not enough audio for DTW")
+        alignment = dtw_align(
+            x_feats,
+            y_feats,
+            dist_method="cityblock",
+            step_pattern="asymmetric",
+            open_begin=False,
+            open_end=True,
+            keep_internals=False,
+        )
 
-        inf = 1e18
-        prev = [inf] * n
-
-        for i in range(m):
-            curr = [inf] * n
-
-            for j in range(n):
-                c = feature_cost(x_feats[i], y_feats[j])
-
-                if i == 0 and j == 0:
-                    best = 0.0
-                else:
-                    best = inf
-
-                    if i > 0:
-                        best = min(best, prev[j])
-                    if j > 0:
-                        best = min(best, curr[j - 1])
-                    if i > 0 and j > 0:
-                        best = min(best, prev[j - 1])
-
-                curr[j] = c + best
-
-            prev = curr
-
-        min_j = min(n - 1, max(0, int(m * self.config.dtw_min_endpoint_ratio)))
-        best_j = min_j
-        best_score = inf
-
-        for j in range(min_j, n):
-            score = prev[j] / max(1, m + j)
-            if score < best_score:
-                best_score = score
-                best_j = j
-
-        return clamp(best_j * hop, 0, len(full_audio))
+        endpoint_frame = int(np.max(np.asarray(alignment.index2, dtype=np.int64)))
+        return clamp(endpoint_frame * hop, 0, len(full_audio))
 
 
 # ---------------------------------------------------------------------------
@@ -807,7 +768,6 @@ class CachedPrefixSpeaker:
         boundary = self.boundary_detector.find_cut(
             cached_prefix_audio=cached_prefix_audio,
             full_audio=full_audio,
-            use_dtw=self.run.use_dtw,
         )
 
         print(
@@ -902,7 +862,6 @@ def configs_from_args(
         out=args.out,
         sr=args.sr,
         chunk_ms=args.chunk_ms,
-        use_dtw=args.use_dtw,
         dump_debug=args.dump_debug,
         debug_dir=args.debug_dir,
         prewarm=args.prewarm,
@@ -962,7 +921,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Standalone cached-prefix TTS splice PoC, no timestamps, no phonemes.",
+        description="Standalone cached-prefix TTS splice PoC using DTW boundary estimation.",
     )
 
     p.add_argument(
@@ -1029,12 +988,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=40.0,
         help="Simulated streaming chunk size.",
-    )
-
-    p.add_argument(
-        "--use-dtw",
-        action="store_true",
-        help="Use rough dependency-free envelope DTW before silence search.",
     )
 
     p.add_argument(
