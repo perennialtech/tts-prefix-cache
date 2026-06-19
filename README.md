@@ -98,21 +98,9 @@ async for data in speaker.pcm16le_stream(
     send_bytes(data)
 ```
 
-## Prewarming prefixes
-
-You can synthesize and cache a prefix before it is needed:
-
-```python
-await speaker.prewarm_prefix("Sure — ")
-```
+## Stable cache identifiers
 
 If your application has its own stable cache identifiers, pass a key:
-
-```python
-await speaker.prewarm_prefix("Sure — ", key=("voice-a", "sure"))
-```
-
-Use the same key when speaking:
 
 ```python
 await speaker.speak(

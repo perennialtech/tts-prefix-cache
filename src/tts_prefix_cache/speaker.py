@@ -36,14 +36,6 @@ class PrefixSpeaker:
         self.logger = logger
         self._sleep = sleep
 
-    async def prewarm_prefix(
-        self,
-        prefix: str,
-        *,
-        key: Hashable | None = None,
-    ) -> None:
-        await self._get_prepared_prefix(prefix, key=key)
-
     async def audio_stream(
         self,
         *,
