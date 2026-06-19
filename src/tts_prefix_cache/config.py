@@ -20,7 +20,7 @@ class PlaybackConfig:
     chunk_ms: float = 40.0
     latency_silence_chunk_ms: float = 30.0
     dump_debug: bool = False
-    debug_dir: str = "poc_debug"
+    debug_dir: str = "debug"
 
 
 @dataclass(frozen=True)

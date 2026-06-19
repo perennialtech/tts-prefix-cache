@@ -380,7 +380,7 @@ wheels = [
 ]
 
 [[package]]
-name = "tts-prefix-cache-poc"
+name = "tts-prefix-cache"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
