@@ -5,7 +5,8 @@ from collections.abc import Callable, Sequence
 
 import numpy as np
 
-from .audio import Audio, as_audio_array, ms_to_samples, samples_to_ms, write_wav
+from .audio import (Audio, as_audio_array, ms_to_samples, samples_to_ms,
+                    write_wav)
 
 Logger = Callable[[str], None]
 

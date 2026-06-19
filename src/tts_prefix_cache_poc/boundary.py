@@ -3,14 +3,8 @@ from __future__ import annotations
 import numpy as np
 from dtw import dtw as dtw_align
 
-from .audio import (
-    Audio,
-    as_audio_array,
-    envelope_features,
-    frame_db,
-    ms_to_samples,
-    trim_trailing_silence_keep,
-)
+from .audio import (Audio, as_audio_array, envelope_features, frame_db,
+                    ms_to_samples, trim_trailing_silence_keep)
 from .config import BoundaryConfig, BoundaryResult
 
 

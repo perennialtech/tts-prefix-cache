@@ -13,6 +13,7 @@ class VoiceParams:
     speed: float = 1.0
     pitch: float = 1.0
 
+
 @dataclass(frozen=True)
 class PlaybackConfig:
     sr: int = 24000

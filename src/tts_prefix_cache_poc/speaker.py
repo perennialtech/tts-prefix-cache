@@ -6,16 +6,12 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 
-from .audio import Audio, fade_in, ms_to_samples, samples_to_ms, silence, write_wav
+from .audio import (Audio, fade_in, ms_to_samples, samples_to_ms, silence,
+                    write_wav)
 from .boundary import BoundaryDetector
 from .cache import PrefixCache, prefix_cache_key
-from .config import (
-    BoundaryConfig,
-    BoundaryResult,
-    PlaybackConfig,
-    Synthesizer,
-    VoiceParams,
-)
+from .config import (BoundaryConfig, BoundaryResult, PlaybackConfig,
+                     Synthesizer, VoiceParams)
 from .sink import BufferedWavSink, write_paced
 
 Logger = Callable[[str], None]

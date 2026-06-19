@@ -125,9 +125,7 @@ def envelope_features(
     if samples.size < padded_len:
         samples = np.pad(samples, (0, padded_len - samples.size))
 
-    frames = np.lib.stride_tricks.sliding_window_view(samples, win)[::hop][
-        :frame_count
-    ]
+    frames = np.lib.stride_tricks.sliding_window_view(samples, win)[::hop][:frame_count]
 
     rms = np.sqrt(np.mean(frames * frames, axis=1))
     db = 20.0 * np.log10(np.maximum(rms, 1e-8))
