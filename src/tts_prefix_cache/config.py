@@ -8,7 +8,6 @@ from ._validation import require_non_negative, require_positive
 from .splice import BoundaryResult, SpliceConfig
 
 CacheStatus = Literal["hit", "miss", "joined"]
-PlaybackClockMode = Literal["source", "buffered_timeline", "sink"]
 
 
 class Synthesizer(Protocol):
@@ -29,7 +28,6 @@ class PrefixSpeakerConfig:
     sample_rate: int = 24000
     chunk_ms: float = 40.0
     wait_silence_chunk_ms: float = 30.0
-    playback_clock: PlaybackClockMode = "source"
     output_lead_ms: float = 20.0
     splice: SpliceConfig = field(default_factory=SpliceConfig)
 
@@ -41,15 +39,17 @@ class PrefixSpeakerConfig:
         require_positive("wait_silence_chunk_ms", self.wait_silence_chunk_ms)
         require_non_negative("output_lead_ms", self.output_lead_ms)
 
-        if self.playback_clock not in ("source", "buffered_timeline", "sink"):
-            raise ValueError(
-                'playback_clock must be "source", "buffered_timeline", or "sink"'
-            )
+
+@dataclass(frozen=True)
+class RenderResult:
+    boundary: BoundaryResult
+    cache_status: CacheStatus
+    wall_elapsed_ms: float
 
 
 @dataclass(frozen=True)
-class SpeakResult:
+class LiveSpeakResult:
     boundary: BoundaryResult
     cache_status: CacheStatus
     silence_samples: int
-    synth_elapsed_ms: float
+    wall_elapsed_ms: float

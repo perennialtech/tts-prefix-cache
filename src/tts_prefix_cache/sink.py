@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,7 +12,6 @@ from ._audio import (Audio, ms_to_samples, samples_to_ms, to_mono_float32,
 from .config import AudioSink
 
 Logger = Callable[[str], None]
-Sleep = Callable[[float], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -120,41 +118,6 @@ async def write_audio_chunks(
 
     for start in range(0, len(samples), chunk_n):
         await sink.write(samples[start : start + chunk_n])
-
-    if logger is not None and label is not None:
-        logger(f"[stream] end {label}")
-
-
-async def stream_audio(
-    *,
-    sink: AudioSink,
-    audio: Audio,
-    sample_rate: int,
-    chunk_ms: float,
-    label: str | None = None,
-    logger: Logger | None = None,
-    sleep: Sleep = asyncio.sleep,
-) -> None:
-    samples = to_mono_float32(audio)
-    chunk_n = max(1, ms_to_samples(sample_rate, chunk_ms))
-
-    if logger is not None and label is not None:
-        logger(
-            f"[stream] start {label}, {samples_to_ms(sample_rate, len(samples)):.1f} ms"
-        )
-
-    start_time = time.perf_counter()
-    elapsed_audio_s = 0.0
-
-    for start in range(0, len(samples), chunk_n):
-        chunk = samples[start : start + chunk_n]
-        await sink.write(chunk)
-
-        elapsed_audio_s += len(chunk) / sample_rate
-        target_time = start_time + elapsed_audio_s
-        now = time.perf_counter()
-        if target_time > now:
-            await sleep(target_time - now)
 
     if logger is not None and label is not None:
         logger(f"[stream] end {label}")

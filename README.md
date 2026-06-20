@@ -65,7 +65,7 @@ async def main() -> None:
 
     audio, result = await speaker.render(
         prefix="Sure, ",
-        rest="I can help with that.",
+        continuation="I can help with that.",
     )
 
     write_wav("out/response.wav", audio, sample_rate=24_000)
@@ -77,14 +77,14 @@ asyncio.run(main())
 
 ## Live playback
 
-Use `speak()` when you are feeding a live sink. Live playback has to make timing decisions: when to release the held prefix tail, when to splice, and when to inject same-stream silence if full synthesis is late.
+Use `speak()` when you are feeding a live sink. Live playback makes timing decisions: when to release the held prefix tail, when to splice, and when to inject same-stream silence if full synthesis is late.
 
 ```python
-from tts_prefix_cache import BufferedWavSink, PrefixSpeakerConfig
+from tts_prefix_cache import PrefixSpeaker, PrefixSpeakerConfig
 
 config = PrefixSpeakerConfig(
     sample_rate=24_000,
-    playback_clock="source",
+    output_lead_ms=20.0,
 )
 
 speaker = PrefixSpeaker(tts=MySynthesizer(), config=config)
@@ -92,96 +92,119 @@ sink = MyLiveAudioSink()
 
 result = await speaker.speak(
     prefix="Sure, ",
-    rest="I can help with that.",
+    continuation="I can help with that.",
     sink=sink,
 )
 ```
 
-## Playback clock modes
+## Live playback timing
 
-The speaker needs exactly one playback clock. The clock controls when cached audio is considered "heard enough" for splice and silence decisions.
+The library uses a local buffered playout timeline.
 
-### `source`
+It writes already-known audio as fast as the sink accepts it, while tracking how much audio has been queued for downstream playback. It does not inject silence merely because Python finished writing cached prefix bytes quickly. It waits until the queued known audio is close to running out, then decides whether to splice, release the held prefix tail, or add same-stream silence.
 
-```python
-PrefixSpeakerConfig(playback_clock="source")
-```
-
-This is the default and safest mode.
-
-The library writes cached prefix audio in real time using source-side sleeps. This keeps splice and silence decisions aligned with ordinary wall-clock playback.
-
-Use this for:
+This is suitable for:
 
 - `audio_stream()`
-- simple queues
-- WebSocket senders without real playout feedback
+- simple bounded queues
+- WebSocket senders without direct playout feedback
 - in-memory sinks
-- sinks that only copy or enqueue data
+- sinks that copy, enqueue, or send data
 
-### `buffered_timeline`
-
-```python
-PrefixSpeakerConfig(
-    playback_clock="buffered_timeline",
-    output_lead_ms=20.0,
-)
-```
-
-This mode writes already-known audio as fast as the sink accepts it, but still tracks a local playout timeline.
-
-The speaker does not inject silence merely because Python finished writing cached prefix bytes quickly. It waits until the queued known audio is close to running out, then decides whether to splice, release the held tail, or add silence.
-
-Use this when the downstream can buffer and pace playback but does not provide direct playback-clock backpressure.
-
-### `sink`
-
-```python
-PrefixSpeakerConfig(playback_clock="sink")
-```
-
-This mode assumes `sink.write()` is the clock.
-
-The speaker does not sleep for cached audio or silence. `sink.write()` must block or apply backpressure according to real playback capacity. Do not use this mode with ordinary in-memory buffers, normal WebSocket sends, or unbounded queues.
-
-There should be one clock, not source sleeps plus sink pacing.
+The sink should not sleep to simulate playback. Downstream audio infrastructure should handle actual playback pacing.
 
 ## Streaming audio chunks
 
 Use `audio_stream()` when you want NumPy audio chunks:
 
 ```python
-async for chunk in speaker.audio_stream(
+stream = speaker.audio_stream(
     prefix="Sure, ",
-    rest="I can help with that.",
-):
+    continuation="I can help with that.",
+)
+
+async for chunk in stream:
     send_audio_chunk(chunk)
+
+result = await stream.result()
 ```
 
 Use `pcm16le_stream()` when your transport expects raw little-endian 16-bit PCM bytes:
 
 ```python
-async for data in speaker.pcm16le_stream(
+stream = speaker.pcm16le_stream(
     prefix="Sure, ",
-    rest="I can help with that.",
-):
+    continuation="I can help with that.",
+)
+
+async for data in stream:
     send_bytes(data)
+
+result = await stream.result()
 ```
 
-`audio_stream()` uses the same playback clock configured on the speaker.
+Drain the stream before awaiting `result()`. If you stop consuming early, call `await stream.aclose()` or use `async with` so the background synthesis task is cancelled cleanly:
 
-## Stable cache identifiers
+```python
+async with speaker.audio_stream(
+    prefix="Sure, ",
+    continuation="I can help with that.",
+) as stream:
+    async for chunk in stream:
+        send_audio_chunk(chunk)
 
-If your application has its own stable cache identifiers, pass a key:
+    result = await stream.result()
+```
+
+## Stable cache identifiers and correctness
+
+By default, the in-memory cache key is scoped to the `PrefixSpeaker` instance and includes the sample rate, splice configuration, and exact prefix text. This prevents accidental reuse across different speakers or splice settings when a cache object is shared.
+
+If your application needs stable identifiers across speakers, restarts, workers, or processes, pass `cache_key` explicitly:
 
 ```python
 await speaker.speak(
     prefix="Sure, ",
-    rest="I can help with that.",
-    key=("voice-a", "sure"),
+    continuation="I can help with that.",
+    cache_key=(
+        "provider-a",
+        "model-x",
+        "voice-a",
+        24_000,
+        "default-style",
+        speaker.config.splice,
+        "Sure, ",
+    ),
     sink=sink,
 )
 ```
+
+The cache key must identify every input that can change either the prefix waveform or the prepared prefix data. At minimum, include:
+
+- TTS provider
+- model
+- voice
+- sample rate
+- speaking rate, style, emotion, language, or prompt settings
+- the exact prefix text, including whitespace and punctuation
+- the splice configuration
+- any other synthesis option that can alter timing, prosody, loudness, or audio format
+
+Do not reuse a cache key across different voices, models, sample rates, style settings, or splice configurations. A wrong cache key can make the library splice prefix audio from one synthesis configuration into full audio from another, producing bad alignment, audible jumps, or incorrect playback.
+
+## Standalone prefix prosody
+
+The cached prefix is synthesized by itself, while the full utterance is synthesized as `prefix + continuation`.
+
+Some TTS systems render a standalone phrase differently from the same phrase at the start of a longer sentence. The library aligns and crossfades the audio, but best results come from prefixes whose standalone rendering is close to their rendering inside the full utterance.
+
+Stable short prefixes such as "Sure, " or "One moment, " usually work better than prefixes whose prosody strongly depends on the following words.
+
+## Prefix warming is intentionally not exposed
+
+This library intentionally does not expose a public prefix warming API. Prefix preparation is an implementation detail driven by `render()`, `speak()`, `audio_stream()`, and `pcm16le_stream()`.
+
+Do not rely on private methods for prefix warming.
 
 ## Custom sinks
 
@@ -198,16 +221,12 @@ Then pass it to `speak()`:
 ```python
 await speaker.speak(
     prefix="Sure, ",
-    rest="I can help with that.",
+    continuation="I can help with that.",
     sink=MySink(),
 )
 ```
 
-The sink contract depends on `playback_clock`:
-
-- With `"source"`, `write()` may simply copy, enqueue, or send data.
-- With `"buffered_timeline"`, `write()` may accept data faster than playback, but the downstream should handle playback pacing.
-- With `"sink"`, `write()` must provide playback-clock backpressure.
+The sink may copy, enqueue, or send data. Downstream playback infrastructure should handle real playback pacing.
 
 ## Configuration
 
@@ -220,7 +239,6 @@ from tts_prefix_cache import PrefixSpeakerConfig, SpliceConfig
 
 config = PrefixSpeakerConfig(
     sample_rate=24_000,
-    playback_clock="buffered_timeline",
     output_lead_ms=20.0,
     splice=SpliceConfig(
         crossfade_ms=30.0,

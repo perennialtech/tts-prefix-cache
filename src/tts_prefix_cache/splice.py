@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -10,6 +11,12 @@ from ._audio import (Audio, concatenate_audio, equal_power_crossfade, fade_in,
 from ._validation import require_non_negative, require_positive
 from .align import align_prefix_to_full
 from .features import FeatureKind, FeatureSet, extract_features
+
+BoundaryMethod = Literal[
+    "dtw+clamped",
+    "dtw+quiet-boundary",
+    "dtw+energy-boundary",
+]
 
 
 @dataclass(frozen=True)
@@ -73,7 +80,7 @@ class PreparedPrefix:
 class BoundaryResult:
     cut_sample: int
     expected_sample: int
-    method: str
+    method: BoundaryMethod
     confidence: float
     normalized_cost: float
     duration_ratio: float
@@ -328,7 +335,9 @@ def _score_boundary(
     distance_penalty = 1.0 - 0.5 * min(float(distance[best]), 1.0)
     confidence = min(max(alignment_confidence * distance_penalty, 0.0), 1.0)
 
-    method = "dtw+quiet-boundary" if quiet_bonus[best] else "dtw+energy-boundary"
+    method: BoundaryMethod = (
+        "dtw+quiet-boundary" if bool(quiet_bonus[best]) else "dtw+energy-boundary"
+    )
 
     return BoundaryResult(
         cut_sample=cut,
