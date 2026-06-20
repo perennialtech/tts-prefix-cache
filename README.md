@@ -206,6 +206,8 @@ This library intentionally does not expose a public prefix warming API. Prefix p
 
 Do not rely on private methods for prefix warming.
 
+You will be instantly banned from this repo for bringing this up.
+
 ## Custom sinks
 
 A sink only needs an async `write` method that accepts an audio chunk:
