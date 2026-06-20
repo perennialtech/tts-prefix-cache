@@ -1,8 +1,9 @@
-from ._audio import Audio, pcm16le_bytes, write_wav
+from ._audio import Audio, pcm16le_bytes
 from .cache import MemoryPrefixCache
 from .config import (AudioSink, CacheStatus, LiveSpeakResult,
                      PrefixSpeakerConfig, RenderResult, Synthesizer)
-from .speaker import PrefixSpeaker, SpeechAudioStream, SpeechPcm16leStream
+from .events import PrefixSpeakerEvent, PrefixSpeakerLogger
+from .speaker import PrefixSpeaker
 from .splice import BoundaryResult, PreparedPrefix, SpliceConfig, SpliceResult
 
 __all__ = [
@@ -15,12 +16,11 @@ __all__ = [
     "PreparedPrefix",
     "PrefixSpeaker",
     "PrefixSpeakerConfig",
+    "PrefixSpeakerEvent",
+    "PrefixSpeakerLogger",
     "RenderResult",
-    "SpeechAudioStream",
-    "SpeechPcm16leStream",
     "SpliceConfig",
     "SpliceResult",
     "Synthesizer",
     "pcm16le_bytes",
-    "write_wav",
 ]

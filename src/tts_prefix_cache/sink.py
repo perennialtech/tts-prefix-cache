@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from ._audio import Audio, ms_to_samples, samples_to_ms, to_mono_float32
 from .config import AudioSink
-
-Logger = Callable[[str], None]
+from .events import PrefixSpeakerEvent, PrefixSpeakerLogger
 
 
 @dataclass(frozen=True)
@@ -76,18 +75,34 @@ async def _write_audio_chunks(
     sample_rate: int,
     chunk_ms: float,
     label: str | None = None,
-    logger: Logger | None = None,
+    logger: PrefixSpeakerLogger | None = None,
 ) -> None:
     samples = to_mono_float32(audio)
     chunk_n = max(1, ms_to_samples(sample_rate, chunk_ms))
 
     if logger is not None and label is not None:
         logger(
-            f"[stream] start {label}, {samples_to_ms(sample_rate, len(samples)):.1f} ms"
+            PrefixSpeakerEvent(
+                name="audio_write_started",
+                data={
+                    "label": label,
+                    "samples": len(samples),
+                    "duration_ms": samples_to_ms(sample_rate, len(samples)),
+                },
+            )
         )
 
     for start in range(0, len(samples), chunk_n):
         await sink.write(samples[start : start + chunk_n])
 
     if logger is not None and label is not None:
-        logger(f"[stream] end {label}")
+        logger(
+            PrefixSpeakerEvent(
+                name="audio_write_completed",
+                data={
+                    "label": label,
+                    "samples": len(samples),
+                    "duration_ms": samples_to_ms(sample_rate, len(samples)),
+                },
+            )
+        )

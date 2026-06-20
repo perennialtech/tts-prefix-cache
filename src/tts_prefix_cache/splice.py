@@ -7,58 +7,40 @@ import numpy as np
 from ._audio import (Audio, concatenate_audio, equal_power_crossfade, fade_in,
                      frame_db, ms_to_samples, to_mono_float32,
                      trim_trailing_silence_keep)
-from ._validation import require_non_negative, require_positive
+from ._validation import require_non_negative
 from .align import align_prefix_to_full
 from .features import FeatureSet, extract_features
+
+_PREFIX_PLAYBACK_KEEP_MS = 160.0
+_PREFIX_MATCH_KEEP_MS = 20.0
+
+_RMS_WINDOW_MS = 42.6666667
+_RMS_HOP_MS = 10.6666667
+
+_FEATURE_WINDOW_MS = 30.0
+_FEATURE_HOP_MS = 10.0
+_MEL_BINS = 32
+
+_MAX_SEARCH_MULTIPLIER = 1.8
+_MAX_SEARCH_EXTRA_MS = 600.0
+_ALLOW_LEADING_PADDING_MS = 120.0
+
+_BOUNDARY_SEARCH_BEFORE_MS = 250.0
+_BOUNDARY_SEARCH_AFTER_MS = 500.0
+_MIN_QUIET_MS = 50.0
 
 
 @dataclass(frozen=True)
 class SpliceConfig:
     silence_threshold_db: float = -43.0
-
-    prefix_playback_keep_ms: float = 160.0
-    prefix_match_keep_ms: float = 20.0
-
-    rms_window_ms: float = 42.6666667
-    rms_hop_ms: float = 10.6666667
-
-    feature_window_ms: float = 30.0
-    feature_hop_ms: float = 10.0
-    mel_bins: int = 32
-
-    max_search_multiplier: float = 1.8
-    max_search_extra_ms: float = 600.0
-    allow_leading_padding_ms: float = 120.0
-
-    boundary_search_before_ms: float = 250.0
-    boundary_search_after_ms: float = 500.0
-    min_quiet_ms: float = 50.0
-
     holdback_ms: float = 50.0
     crossfade_ms: float = 35.0
-    continuation_fade_in_ms: float = 20.0
+    continuation_fade_in_ms: float = 5.0
 
     def __post_init__(self) -> None:
-        require_non_negative("prefix_playback_keep_ms", self.prefix_playback_keep_ms)
-        require_non_negative("prefix_match_keep_ms", self.prefix_match_keep_ms)
-        require_positive("rms_window_ms", self.rms_window_ms)
-        require_positive("rms_hop_ms", self.rms_hop_ms)
-        require_positive("feature_window_ms", self.feature_window_ms)
-        require_positive("feature_hop_ms", self.feature_hop_ms)
-        require_positive("max_search_multiplier", self.max_search_multiplier)
-        require_non_negative("max_search_extra_ms", self.max_search_extra_ms)
-        require_non_negative("allow_leading_padding_ms", self.allow_leading_padding_ms)
-        require_non_negative(
-            "boundary_search_before_ms", self.boundary_search_before_ms
-        )
-        require_non_negative("boundary_search_after_ms", self.boundary_search_after_ms)
-        require_non_negative("min_quiet_ms", self.min_quiet_ms)
         require_non_negative("holdback_ms", self.holdback_ms)
         require_non_negative("crossfade_ms", self.crossfade_ms)
         require_non_negative("continuation_fade_in_ms", self.continuation_fade_in_ms)
-
-        if self.mel_bins <= 0:
-            raise ValueError("mel_bins must be positive")
 
 
 @dataclass(frozen=True)
@@ -94,13 +76,13 @@ def _prepare_prefix_audio(
     if raw.size == 0:
         raise ValueError("prefix audio must not be empty")
 
-    frame_size, hop = _rms_frame_size_and_hop(sample_rate, config)
+    frame_size, hop = _rms_frame_size_and_hop(sample_rate)
 
     playback_audio = trim_trailing_silence_keep(
         raw,
         sample_rate,
         threshold_db=config.silence_threshold_db,
-        keep_ms=config.prefix_playback_keep_ms,
+        keep_ms=_PREFIX_PLAYBACK_KEEP_MS,
         frame_size=frame_size,
         hop=hop,
     )
@@ -108,7 +90,7 @@ def _prepare_prefix_audio(
         raw,
         sample_rate,
         threshold_db=config.silence_threshold_db,
-        keep_ms=config.prefix_match_keep_ms,
+        keep_ms=_PREFIX_MATCH_KEEP_MS,
         frame_size=frame_size,
         hop=hop,
     )
@@ -116,7 +98,7 @@ def _prepare_prefix_audio(
     return PreparedPrefix(
         playback_audio=playback_audio,
         match_audio=match_audio,
-        features=_features(match_audio, sample_rate, config),
+        features=_features(match_audio, sample_rate),
     )
 
 
@@ -131,12 +113,13 @@ def _find_boundary(
     if full.size == 0:
         raise ValueError("full audio must not be empty")
 
+    allowed_leading_padding = ms_to_samples(sample_rate, _ALLOW_LEADING_PADDING_MS)
     max_search_len = min(
         full.size,
         int(
-            prefix.match_audio.size * config.max_search_multiplier
-            + ms_to_samples(sample_rate, config.max_search_extra_ms)
-            + ms_to_samples(sample_rate, config.allow_leading_padding_ms)
+            prefix.match_audio.size * _MAX_SEARCH_MULTIPLIER
+            + ms_to_samples(sample_rate, _MAX_SEARCH_EXTRA_MS)
+            + allowed_leading_padding
         ),
     )
     max_search_len = max(1, max_search_len)
@@ -144,9 +127,15 @@ def _find_boundary(
     full_head = full[:max_search_len]
     alignment = align_prefix_to_full(
         prefix.features,
-        _features(full_head, sample_rate, config),
+        _features(full_head, sample_rate),
         full_sample_count=full_head.size,
     )
+
+    if alignment.start_sample > allowed_leading_padding:
+        raise ValueError(
+            "prefix alignment starts after allowed leading padding "
+            f"({alignment.start_sample} samples > {allowed_leading_padding} samples)"
+        )
 
     expected = min(alignment.endpoint_sample, full.size)
     return _score_boundary(
@@ -240,23 +229,20 @@ def _stitch_audio(
     return concatenate_audio((prefix_head, splice.continuation)), splice
 
 
-def _features(audio: Audio, sample_rate: int, config: SpliceConfig) -> FeatureSet:
+def _features(audio: Audio, sample_rate: int) -> FeatureSet:
     return extract_features(
         audio,
         sample_rate,
-        hop_ms=config.feature_hop_ms,
-        window_ms=config.feature_window_ms,
-        mel_bins=config.mel_bins,
+        hop_ms=_FEATURE_HOP_MS,
+        window_ms=_FEATURE_WINDOW_MS,
+        mel_bins=_MEL_BINS,
     )
 
 
-def _rms_frame_size_and_hop(
-    sample_rate: int,
-    config: SpliceConfig,
-) -> tuple[int, int]:
+def _rms_frame_size_and_hop(sample_rate: int) -> tuple[int, int]:
     return (
-        max(1, ms_to_samples(sample_rate, config.rms_window_ms)),
-        max(1, ms_to_samples(sample_rate, config.rms_hop_ms)),
+        max(1, ms_to_samples(sample_rate, _RMS_WINDOW_MS)),
+        max(1, ms_to_samples(sample_rate, _RMS_HOP_MS)),
     )
 
 
@@ -270,15 +256,15 @@ def _score_boundary(
     alignment_confidence: float,
     duration_ratio: float,
 ) -> BoundaryResult:
-    search_before = ms_to_samples(sample_rate, config.boundary_search_before_ms)
-    search_after = ms_to_samples(sample_rate, config.boundary_search_after_ms)
+    search_before = ms_to_samples(sample_rate, _BOUNDARY_SEARCH_BEFORE_MS)
+    search_after = ms_to_samples(sample_rate, _BOUNDARY_SEARCH_AFTER_MS)
 
     lo = max(0, expected_sample - search_before)
     hi = min(full.size, expected_sample + search_after)
 
     candidates = np.arange(lo, hi + 1, dtype=np.int64)
 
-    frame_size, hop = _rms_frame_size_and_hop(sample_rate, config)
+    frame_size, hop = _rms_frame_size_and_hop(sample_rate)
     dbs = frame_db(full, frame_size=frame_size, hop=hop)
 
     if dbs.size:
@@ -288,7 +274,7 @@ def _score_boundary(
             dbs,
             threshold_db=config.silence_threshold_db,
             min_frames=max(
-                1, (ms_to_samples(sample_rate, config.min_quiet_ms) + hop - 1) // hop
+                1, (ms_to_samples(sample_rate, _MIN_QUIET_MS) + hop - 1) // hop
             ),
         )
         quiet_bonus = quiet_frames[frames].astype(np.float64)

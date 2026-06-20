@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-import os
-import struct
-import wave
-from pathlib import Path
-
 import numpy as np
 import numpy.typing as npt
 
@@ -51,17 +46,6 @@ def pcm16le_bytes(audio: object) -> bytes:
         return b""
 
     return (samples * 32767.0).astype("<i2", copy=False).tobytes()
-
-
-def write_wav(path: str | os.PathLike[str], audio: object, sample_rate: int) -> None:
-    wav_path = Path(path)
-    wav_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with wave.open(str(wav_path), "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(struct.calcsize("<h"))
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm16le_bytes(audio))
 
 
 def _frame_inputs(

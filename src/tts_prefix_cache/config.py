@@ -42,7 +42,10 @@ class PrefixSpeakerConfig:
 class RenderResult:
     boundary: BoundaryResult
     cache_status: CacheStatus
-    wall_elapsed_ms: float
+    prefix_ready_ms: float
+    full_synthesis_ms: float
+    splice_ms: float
+    total_elapsed_ms: float
 
 
 @dataclass(frozen=True)
@@ -50,4 +53,8 @@ class LiveSpeakResult:
     boundary: BoundaryResult
     cache_status: CacheStatus
     silence_samples: int
-    wall_elapsed_ms: float
+    prefix_ready_ms: float
+    full_synthesis_ms: float
+    splice_ms: float
+    continuation_write_ms: float
+    total_elapsed_ms: float
