@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -119,12 +120,22 @@ async def stream_audio(
             f"[stream] start {label}, {samples_to_ms(sample_rate, len(samples)):.1f} ms"
         )
 
+    start_time = 0.0
+    if pace:
+        start_time = time.perf_counter()
+
+    elapsed_audio_s = 0.0
+
     for start in range(0, len(samples), chunk_n):
         chunk = samples[start : start + chunk_n]
         await sink.write(chunk)
 
         if pace:
-            await sleep(len(chunk) / sample_rate)
+            elapsed_audio_s += len(chunk) / sample_rate
+            target_time = start_time + elapsed_audio_s
+            now = time.perf_counter()
+            if target_time > now:
+                await sleep(target_time - now)
 
     if logger is not None and label is not None:
         logger(f"[stream] end {label}")

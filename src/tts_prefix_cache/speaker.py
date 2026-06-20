@@ -181,7 +181,7 @@ class PrefixSpeaker:
                 audio=splice.continuation,
                 sample_rate=self.config.sample_rate,
                 chunk_ms=self.config.chunk_ms,
-                pace=self.config.pace_audio,
+                pace=False,
                 label="generated continuation",
                 logger=self.logger,
                 sleep=self._sleep,
@@ -271,13 +271,22 @@ class PrefixSpeaker:
         )
         silence_samples = 0
 
+        start_time = time.perf_counter()
+        elapsed_audio_s = 0.0
+        chunk_duration_s = self.config.wait_silence_chunk_ms / 1000.0
+
         while not task.done():
             if silence_samples == 0:
                 self._log("[stream] full synth not ready, adding same-stream silence")
 
             await sink.write(silence_chunk)
             silence_samples += len(silence_chunk)
-            await self._sleep(self.config.wait_silence_chunk_ms / 1000.0)
+
+            elapsed_audio_s += chunk_duration_s
+            target_time = start_time + elapsed_audio_s
+            now = time.perf_counter()
+            if target_time > now:
+                await self._sleep(target_time - now)
 
         return await task, silence_samples
 
