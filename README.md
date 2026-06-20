@@ -4,6 +4,8 @@ Low-latency audio prefix splicing for speech and TTS pipelines.
 
 `tts-prefix-cache` lets you play a cached synthesized prefix immediately while a full utterance is being generated in the background, then splice into the generated continuation once it is ready.
 
+This library intentionally does not expose a public prefix warming API because we do not need it internally.
+
 ## When to use this
 
 Use this package when your application often starts responses with repeated text, such as:
@@ -199,14 +201,6 @@ The cached prefix is synthesized by itself, while the full utterance is synthesi
 Some TTS systems render a standalone phrase differently from the same phrase at the start of a longer sentence. The library aligns and crossfades the audio, but best results come from prefixes whose standalone rendering is close to their rendering inside the full utterance.
 
 Stable short prefixes such as "Sure, " or "One moment, " usually work better than prefixes whose prosody strongly depends on the following words.
-
-## Prefix warming is intentionally not exposed
-
-This library intentionally does not expose a public prefix warming API. Prefix preparation is an implementation detail driven by `render()`, `speak()`, `audio_stream()`, and `pcm16le_stream()`.
-
-Do not rely on private methods for prefix warming.
-
-You will be instantly banned from this repo for bringing this up.
 
 ## Custom sinks
 
