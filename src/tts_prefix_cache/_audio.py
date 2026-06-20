@@ -142,20 +142,6 @@ def fade_in(audio: Audio, fade_samples: int) -> Audio:
     return out
 
 
-def fade_out(audio: Audio, fade_samples: int) -> Audio:
-    out = audio.copy()
-    if out.size == 0 or fade_samples <= 0:
-        return out
-
-    n = min(fade_samples, out.size)
-    if n == 1:
-        out[0] *= 1.0
-        return out
-
-    out[-n:] *= np.linspace(1.0, 0.0, n, dtype=np.float32)
-    return out
-
-
 def equal_power_crossfade(left: object, right: object) -> Audio:
     left_samples = to_mono_float32(left)
     right_samples = to_mono_float32(right)

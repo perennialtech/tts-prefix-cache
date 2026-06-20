@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 
@@ -10,13 +9,7 @@ from ._audio import (Audio, concatenate_audio, equal_power_crossfade, fade_in,
                      trim_trailing_silence_keep)
 from ._validation import require_non_negative, require_positive
 from .align import align_prefix_to_full
-from .features import FeatureKind, FeatureSet, extract_features
-
-BoundaryMethod = Literal[
-    "dtw+clamped",
-    "dtw+quiet-boundary",
-    "dtw+energy-boundary",
-]
+from .features import FeatureSet, extract_features
 
 
 @dataclass(frozen=True)
@@ -29,7 +22,6 @@ class SpliceConfig:
     rms_window_ms: float = 42.6666667
     rms_hop_ms: float = 10.6666667
 
-    feature_kind: FeatureKind = "log_mel"
     feature_window_ms: float = 30.0
     feature_hop_ms: float = 10.0
     mel_bins: int = 32
@@ -80,7 +72,7 @@ class PreparedPrefix:
 class BoundaryResult:
     cut_sample: int
     expected_sample: int
-    method: BoundaryMethod
+    method: str
     confidence: float
     normalized_cost: float
     duration_ratio: float
@@ -92,7 +84,7 @@ class SpliceResult:
     continuation: Audio
 
 
-def prepare_prefix_audio(
+def _prepare_prefix_audio(
     audio: object,
     *,
     sample_rate: int,
@@ -128,7 +120,7 @@ def prepare_prefix_audio(
     )
 
 
-def find_boundary(
+def _find_boundary(
     *,
     prefix: PreparedPrefix,
     full_audio: object,
@@ -168,7 +160,7 @@ def find_boundary(
     )
 
 
-def splice_from_full_audio(
+def _splice_from_full_audio(
     *,
     prefix: PreparedPrefix,
     full_audio: object,
@@ -177,7 +169,7 @@ def splice_from_full_audio(
     held_tail: object | None = None,
 ) -> SpliceResult:
     full = to_mono_float32(full_audio)
-    boundary = find_boundary(
+    boundary = _find_boundary(
         prefix=prefix,
         full_audio=full,
         sample_rate=sample_rate,
@@ -218,7 +210,7 @@ def splice_from_full_audio(
     return SpliceResult(boundary=boundary, continuation=continuation)
 
 
-def stitch_audio(
+def _stitch_audio(
     *,
     prefix: PreparedPrefix,
     full_audio: object,
@@ -237,7 +229,7 @@ def stitch_audio(
         prefix_head = prefix.playback_audio
         held_tail = np.zeros(0, dtype=np.float32)
 
-    splice = splice_from_full_audio(
+    splice = _splice_from_full_audio(
         prefix=prefix,
         full_audio=full_audio,
         sample_rate=sample_rate,
@@ -252,7 +244,6 @@ def _features(audio: Audio, sample_rate: int, config: SpliceConfig) -> FeatureSe
     return extract_features(
         audio,
         sample_rate,
-        kind=config.feature_kind,
         hop_ms=config.feature_hop_ms,
         window_ms=config.feature_window_ms,
         mel_bins=config.mel_bins,
@@ -286,16 +277,6 @@ def _score_boundary(
     hi = min(full.size, expected_sample + search_after)
 
     candidates = np.arange(lo, hi + 1, dtype=np.int64)
-    if candidates.size == 0:
-        cut = min(max(expected_sample, 0), full.size)
-        return BoundaryResult(
-            cut_sample=cut,
-            expected_sample=expected_sample,
-            method="dtw+clamped",
-            confidence=alignment_confidence,
-            normalized_cost=normalized_cost,
-            duration_ratio=duration_ratio,
-        )
 
     frame_size, hop = _rms_frame_size_and_hop(sample_rate, config)
     dbs = frame_db(full, frame_size=frame_size, hop=hop)
@@ -335,9 +316,7 @@ def _score_boundary(
     distance_penalty = 1.0 - 0.5 * min(float(distance[best]), 1.0)
     confidence = min(max(alignment_confidence * distance_penalty, 0.0), 1.0)
 
-    method: BoundaryMethod = (
-        "dtw+quiet-boundary" if bool(quiet_bonus[best]) else "dtw+energy-boundary"
-    )
+    method = "dtw+quiet-boundary" if bool(quiet_bonus[best]) else "dtw+energy-boundary"
 
     return BoundaryResult(
         cut_sample=cut,

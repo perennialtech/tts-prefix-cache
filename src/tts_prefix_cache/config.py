@@ -27,7 +27,6 @@ class AudioSink(Protocol):
 class PrefixSpeakerConfig:
     sample_rate: int = 24000
     chunk_ms: float = 40.0
-    wait_silence_chunk_ms: float = 30.0
     output_lead_ms: float = 20.0
     splice: SpliceConfig = field(default_factory=SpliceConfig)
 
@@ -36,7 +35,6 @@ class PrefixSpeakerConfig:
             raise ValueError("sample_rate must be positive")
 
         require_positive("chunk_ms", self.chunk_ms)
-        require_positive("wait_silence_chunk_ms", self.wait_silence_chunk_ms)
         require_non_negative("output_lead_ms", self.output_lead_ms)
 
 

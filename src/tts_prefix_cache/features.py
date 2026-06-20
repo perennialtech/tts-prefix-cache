@@ -2,15 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
 
-from ._audio import (Audio, _frame_inputs, frame_db, ms_to_samples,
-                     to_mono_float32)
-
-FeatureKind = Literal["log_mel", "envelope"]
+from ._audio import Audio, _frame_inputs, ms_to_samples, to_mono_float32
 
 
 @dataclass(frozen=True)
@@ -25,31 +21,19 @@ def extract_features(
     audio: Audio,
     sample_rate: int,
     *,
-    kind: FeatureKind,
     hop_ms: float,
     window_ms: float,
     mel_bins: int,
 ) -> FeatureSet:
     samples = to_mono_float32(audio)
 
-    if kind == "log_mel":
-        return _log_mel_features(
-            samples,
-            sample_rate,
-            hop_ms=hop_ms,
-            window_ms=window_ms,
-            mel_bins=mel_bins,
-        )
-
-    if kind == "envelope":
-        return _envelope_features(
-            samples,
-            sample_rate,
-            hop_ms=hop_ms,
-            window_ms=window_ms,
-        )
-
-    raise ValueError(f"unsupported feature kind: {kind}")
+    return _log_mel_features(
+        samples,
+        sample_rate,
+        hop_ms=hop_ms,
+        window_ms=window_ms,
+        mel_bins=mel_bins,
+    )
 
 
 def _log_mel_features(
@@ -85,37 +69,6 @@ def _log_mel_features(
     base = np.concatenate((log_mel, energy), axis=1)
     features = np.concatenate((base, _delta(base) * 0.5), axis=1)
 
-    return FeatureSet(_standardize(features), hop, win, audio.size)
-
-
-def _envelope_features(
-    audio: Audio,
-    sample_rate: int,
-    *,
-    hop_ms: float,
-    window_ms: float,
-) -> FeatureSet:
-    hop = max(1, ms_to_samples(sample_rate, hop_ms))
-    win = max(1, ms_to_samples(sample_rate, window_ms))
-
-    samples, starts = _frame_inputs(audio, frame_size=win, hop=hop)
-    if starts.size == 0:
-        return FeatureSet(np.empty((0, 0), dtype=np.float64), hop, win, audio.size)
-
-    windows = np.lib.stride_tricks.sliding_window_view(samples, win)
-    frames = windows[starts]
-
-    db = frame_db(audio, frame_size=win, hop=hop)
-    db_norm = (np.clip(db, -80.0, 0.0) + 80.0) / 80.0
-
-    if win > 1:
-        signs = np.signbit(frames)
-        crossings = signs[:, 1:] != signs[:, :-1]
-        zcr = np.sum(crossings, axis=1) / (win - 1)
-    else:
-        zcr = np.zeros(starts.size, dtype=np.float64)
-
-    features = np.column_stack((db_norm, zcr * 0.25))
     return FeatureSet(_standardize(features), hop, win, audio.size)
 
 

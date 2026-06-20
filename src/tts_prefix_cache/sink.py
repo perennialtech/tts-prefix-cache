@@ -3,12 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from pathlib import Path
 
-import numpy as np
-
-from ._audio import (Audio, ms_to_samples, samples_to_ms, to_mono_float32,
-                     write_wav)
+from ._audio import Audio, ms_to_samples, samples_to_ms, to_mono_float32
 from .config import AudioSink
 
 Logger = Callable[[str], None]
@@ -19,7 +15,7 @@ class _QueueEnd:
     error: BaseException | None = None
 
 
-class QueueAudioSink:
+class _QueueAudioSink:
     def __init__(self, *, max_chunks: int = 16):
         if max_chunks <= 0:
             raise ValueError("max_chunks must be positive")
@@ -73,33 +69,7 @@ class QueueAudioSink:
         return self.chunks()
 
 
-class BufferedWavSink:
-    def __init__(self, *, path: str | Path, sample_rate: int):
-        self.path = Path(path)
-        self.sample_rate = sample_rate
-        self._chunks: list[Audio] = []
-
-    @property
-    def audio(self) -> Audio:
-        if not self._chunks:
-            return np.zeros(0, dtype=np.float32)
-
-        return np.concatenate(self._chunks).astype(np.float32, copy=False)
-
-    async def write(self, chunk: Audio) -> None:
-        audio = to_mono_float32(chunk)
-        if audio.size:
-            self._chunks.append(audio.copy())
-
-        await asyncio.sleep(0)
-
-    def save(self) -> int:
-        audio = self.audio
-        write_wav(self.path, audio, self.sample_rate)
-        return len(audio)
-
-
-async def write_audio_chunks(
+async def _write_audio_chunks(
     *,
     sink: AudioSink,
     audio: Audio,

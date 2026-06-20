@@ -11,9 +11,9 @@ from ._audio import (Audio, ms_to_samples, pcm16le_bytes, samples_to_ms,
 from .cache import MemoryPrefixCache
 from .config import (AudioSink, CacheStatus, LiveSpeakResult,
                      PrefixSpeakerConfig, RenderResult, Synthesizer)
-from .sink import QueueAudioSink, write_audio_chunks
-from .splice import (PreparedPrefix, SpliceResult, prepare_prefix_audio,
-                     splice_from_full_audio, stitch_audio)
+from .sink import _QueueAudioSink, _write_audio_chunks
+from .splice import (PreparedPrefix, SpliceResult, _prepare_prefix_audio,
+                     _splice_from_full_audio, _stitch_audio)
 
 Logger = Callable[[str], None]
 Sleep = Callable[[float], Awaitable[None]]
@@ -25,7 +25,7 @@ class SpeechAudioStream:
         producer: Callable[[AudioSink], Awaitable[LiveSpeakResult]],
     ) -> None:
         self._producer = producer
-        self._sink = QueueAudioSink()
+        self._sink = _QueueAudioSink()
         self._task: asyncio.Task[LiveSpeakResult] | None = None
         self._result: LiveSpeakResult | None = None
         self._started = False
@@ -185,7 +185,7 @@ class PrefixSpeaker:
             full_audio = await full_task
 
             audio, splice = await asyncio.to_thread(
-                stitch_audio,
+                _stitch_audio,
                 prefix=prepared,
                 full_audio=full_audio,
                 sample_rate=self.config.sample_rate,
@@ -281,7 +281,7 @@ class PrefixSpeaker:
                 f"using {splice.boundary.method}, confidence {splice.boundary.confidence:.3f}"
             )
 
-            await write_audio_chunks(
+            await _write_audio_chunks(
                 sink=sink,
                 audio=splice.continuation,
                 sample_rate=self.config.sample_rate,
@@ -318,7 +318,7 @@ class PrefixSpeaker:
         timeline_start = time.perf_counter()
         queued_samples = 0
 
-        await write_audio_chunks(
+        await _write_audio_chunks(
             sink=sink,
             audio=prefix_head,
             sample_rate=self.config.sample_rate,
@@ -344,7 +344,7 @@ class PrefixSpeaker:
             )
 
         if held_tail is not None and held_tail.size:
-            await write_audio_chunks(
+            await _write_audio_chunks(
                 sink=sink,
                 audio=held_tail,
                 sample_rate=self.config.sample_rate,
@@ -421,7 +421,7 @@ class PrefixSpeaker:
     async def _prepare_prefix(self, prefix: str) -> PreparedPrefix:
         audio = await self._synthesize(prefix)
         return await asyncio.to_thread(
-            prepare_prefix_audio,
+            _prepare_prefix_audio,
             audio,
             sample_rate=self.config.sample_rate,
             config=self.config.splice,
@@ -435,7 +435,7 @@ class PrefixSpeaker:
         held_tail: object | None = None,
     ) -> SpliceResult:
         return await asyncio.to_thread(
-            splice_from_full_audio,
+            _splice_from_full_audio,
             prefix=prefix,
             full_audio=full_audio,
             sample_rate=self.config.sample_rate,
@@ -451,7 +451,7 @@ class PrefixSpeaker:
     ) -> tuple[Audio, int]:
         silence_chunk = silence(
             self.config.sample_rate,
-            self.config.wait_silence_chunk_ms,
+            30.0,
         )
         silence_samples = 0
         start_time = time.perf_counter()
