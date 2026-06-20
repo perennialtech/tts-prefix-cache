@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Low-latency audio prefix splicing for speech and TTS pipelines"
 requires-python = ">=3.11"
 dependencies = [
-    "dtw-python>=1.5.3",
-    "numpy>=1.26",
+    "dtw-python>=1.7",
+    "numpy>=2.4",
 ]
 
 [build-system]
